@@ -2,6 +2,7 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' data: blob:; frame-src 'self' about: blob: data:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#172e74">
 <meta name="mobile-web-app-capable" content="yes">
@@ -1614,16 +1615,33 @@ function defaultSettings(){
 }
 function isObj(v){ return v && typeof v === 'object' && !Array.isArray(v); }
 function deepMerge(a, b){
-  Object.keys(b || {}).forEach(k => { if(isObj(a[k]) && isObj(b[k])) deepMerge(a[k], b[k]); else a[k] = b[k]; });
+  Object.keys(b || {}).forEach(k => { if(k === '__proto__' || k === 'constructor' || k === 'prototype') return; if(isObj(a[k]) && isObj(b[k])) deepMerge(a[k], b[k]); else a[k] = b[k]; });
   return a;
 }
 const DB_ARRAYS = ['products','customers','suppliers','sales','purchases','salesReturns','purchaseReturns','expenses','payments','treasury','quotes','partners','partnerTx','distributions','audit','stocktakes','wallets','shelves'];
+/* أمان: تعقيم البيانات المحمّلة/المستورَدة — المعرّفات والتواريخ والأرقام لا تحتوي إلا على أحرف آمنة */
+const SAN_NUM = new Set(['amount','paid','due','net','price','cost','costPrice','salePrice','wholesalePrice','discount','opening','openingBalance','balance','total','subtotal','fee','refund','lineTotal','profit','qty','minQty','maxQty','pct','percent','share','days','stock','book','need','rate','count','quantity']);
+function sanitizeData(o, depth){
+  if(!o || typeof o !== 'object' || depth > 8) return;
+  if(Array.isArray(o)){ o.forEach(v => { if(v && typeof v === 'object') sanitizeData(v, depth+1); }); return; }
+  Object.keys(o).forEach(k => {
+    if(k === '__proto__' || k === 'constructor' || k === 'prototype'){ delete o[k]; return; }
+    const v = o[k];
+    if(v && typeof v === 'object'){ sanitizeData(v, depth+1); return; }
+    if(k === 'id' || /Id$/.test(k) || k === 'refId' || k === '_link'){ if(v != null) o[k] = String(v).replace(/[^\w\-.]/g, ''); }
+    else if(k === 'date' || k === 'time' || k === 'validUntil' || k === 'lastDownload'){ if(v != null) o[k] = String(v).replace(/[^\d\-:T .\/]/g, ''); }
+    else if(SAN_NUM.has(k) && typeof v !== 'number'){ const n = (typeof v === 'string' || typeof v === 'boolean') ? parseFloat(v) : NaN; o[k] = isFinite(n) ? n : 0; }
+    else if(SAN_NUM.has(k) && !isFinite(v)){ o[k] = 0; }
+  });
+}
 function normalizeDB(p){
   const out = {};
   DB_ARRAYS.forEach(k => { out[k] = (p && Array.isArray(p[k])) ? p[k] : []; });
   out.settings = deepMerge(defaultSettings(), (p && isObj(p.settings)) ? p.settings : {});
   out.counters = Object.assign({sale:0,purchase:0,quote:0,saleReturn:0,purchaseReturn:0}, (p && p.counters) || {});
   out.meta = (p && isObj(p.meta)) ? p.meta : {};
+  DB_ARRAYS.forEach(k => sanitizeData(out[k], 0));
+  sanitizeData(out.counters, 0);
   return out;
 }
 let db = normalizeDB(null);
@@ -2282,7 +2300,7 @@ function renderProducts(){
         oninput="state.productSearch=this.value; render();">
       ${state.productSearch ? `<button class="btn ghost sm" onclick="state.productSearch='';render()">مسح</button>`:''}
       <select class="search-box" style="flex:0 0 150px" onchange="state.prodBrand=this.value;render()"><option value="">كل الماركات</option>${[...new Set(db.products.map(p=>p.brand).filter(Boolean))].sort().map(b=>`<option ${state.prodBrand===b?'selected':''}>${esc(b)}</option>`).join('')}</select>
-      <select class="search-box" style="flex:0 0 150px" onchange="state.prodQuality=this.value;render()"><option value="">كل الأنواع</option>${qualityList().map(b=>`<option ${state.prodQuality===b?'selected':''}>${b}</option>`).join('')}</select>
+      <select class="search-box" style="flex:0 0 150px" onchange="state.prodQuality=this.value;render()"><option value="">كل الأنواع</option>${qualityList().map(b=>`<option ${state.prodQuality===b?'selected':''}>${esc(b)}</option>`).join('')}</select>
       <select class="search-box" style="flex:0 0 150px" onchange="state.prodShelf=this.value;render()"><option value="">كل الرفوف</option><option value="__none" ${state.prodShelf==='__none'?'selected':''}>بدون رف</option>${db.shelves.slice().sort(shelfCmp).map(x=>`<option ${state.prodShelf===x.name?'selected':''}>${esc(x.name)}</option>`).join('')}</select>
       <button class="btn ghost sm" onclick="exportProductsCSV(true)" title="قالب للاستيراد">قالب CSV</button>
     </div>
@@ -2327,7 +2345,7 @@ function renderProducts(){
 function productForm(id){
   const p = id ? db.products.find(x=>x.id===id) : null;
   const d = p || {code:'', barcode:'', name:'', category:'', unit:db.settings.rules.defaultUnit||'قطعة', costPrice:0, salePrice:0, qty:0, minQty:num(db.settings.rules.defaultMin), notes:''};
-  const autoCode = p ? d.code : 'P-' + pad(db.products.length + 1);
+  const autoCode = p ? d.code : nextProductCode();
 
   showModal(p ? 'تعديل صنف' : 'إضافة صنف جديد', `
     <div class="form-grid">
@@ -2342,7 +2360,7 @@ function productForm(id){
       </div>
       <div class="field"><label>الماركة / المصنّع (CAT, Komatsu...)</label><input id="f_brand" value="${esc(d.brand||'')}" list="brandList"><datalist id="brandList">${[...new Set(db.settings.lists.brands.concat(db.products.map(x=>x.brand).filter(Boolean)))].map(b=>`<option value="${esc(b)}">`).join('')}</datalist></div>
       <div class="field"><label>الرقم الأصلي للقطعة (OEM)</label><input id="f_partno" value="${esc(d.partNo||'')}"></div>
-      <div class="field"><label>النوع / الجودة</label><select id="f_quality"><option value="">—</option>${qualityList().map(q=>`<option ${d.quality===q?'selected':''}>${q}</option>`).join('')}</select></div>
+      <div class="field"><label>النوع / الجودة</label><select id="f_quality"><option value="">—</option>${qualityList().map(q=>`<option ${d.quality===q?'selected':''}>${esc(q)}</option>`).join('')}</select></div>
       <div class="field"><label>الرف / مكان التخزين</label><input id="f_loc" value="${esc(d.location||'')}" list="shelfList" placeholder="اختر رفًا أو اكتب جديدًا"><datalist id="shelfList">${db.shelves.slice().sort(shelfCmp).map(x=>`<option value="${esc(x.name)}">`).join('')}</datalist></div>
       <div class="field full"><label>أرقام بديلة (افصل بينها بفاصلة)</label><input id="f_alt" value="${esc(d.altNos||'')}" placeholder="مثال: 6I-2499, 7G-1234"></div>
       <div class="field full"><label>يناسب المعدات / الموديلات</label><input id="f_models" value="${esc(d.models||'')}" placeholder="مثال: CAT 320D, Komatsu PC200"></div>
@@ -2768,7 +2786,7 @@ function renderSaleForm(){
       <div class="totals-row">
         <span class="l">المبلغ المدفوع</span>
         <input type="number" step="0.01" style="width:130px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;text-align:left"
-          value="${num(d.paid)}" id="s_paid" oninput="saleDraft.paid=parseFloat(this.value)||0; saleDraft.paidManual=true; updateSaleTotals();">
+          value="${num(d.paid)}" id="s_paid" oninput="saleDraft.paid=parseFloat(this.value)||0; saleDraft.paidManual=(this.value.trim()!==''); updateSaleTotals();">
       </div>
       <div class="totals-row"><span class="l">المبلغ المتبقي</span><b id="saleDue" style="color:var(--danger)">0 ${CUR}</b></div>
     </div>
@@ -3575,7 +3593,7 @@ function renderPurchaseForm(){
       <div class="totals-row big"><span class="l">المبلغ النهائي</span><span id="purNet">0.00 ${CUR}</span></div>
       <div class="totals-row"><span class="l">المبلغ المدفوع</span>
         <input type="number" step="0.01" style="width:130px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;text-align:left"
-          value="${num(d.paid)}" oninput="purchaseDraft.paid=parseFloat(this.value)||0; updatePurchaseTotals();"></div>
+          value="${num(d.paid)}" id="p_paid" oninput="purchaseDraft.paid=parseFloat(this.value)||0; purchaseDraft.paidManual=(this.value.trim()!==''); updatePurchaseTotals();"></div>
       <div class="totals-row"><span class="l">المبلغ المتبقي</span><b id="purDue" style="color:var(--danger)">0.00 ${CUR}</b></div>
     </div>
   </div>
@@ -3584,7 +3602,7 @@ function renderPurchaseForm(){
     <h3>بيانات الدفع والملاحظات</h3>
     <div class="form-grid">
       <div class="field"><label>طريقة الدفع</label>
-        <select onchange="purchaseDraft.payMethod=this.value;purchaseDraft.account=accForMethod(this.value);payWalletRefresh('p_wallet',purchaseDraft.account)">
+        <select onchange="purchaseDraft.payMethod=this.value;purchaseDraft.account=accForMethod(this.value);payWalletRefresh('p_wallet',purchaseDraft.account);purchaseDraft.paidManual=false;if(this.value==='آجل')purchaseDraft.paid=0;updatePurchaseTotals()">
           <option value="نقدي" ${d.payMethod==='نقدي'?'selected':''}>نقدي</option>
           <option value="آجل" ${d.payMethod==='آجل'?'selected':''}>آجل</option>
           <option value="محفظة إلكترونية" ${d.payMethod==='محفظة إلكترونية'?'selected':''}>محفظة إلكترونية</option>
@@ -3678,6 +3696,11 @@ function updatePurchaseTotals(){
     if(el) el.textContent = fmt(t);
   });
   const net = Math.max(0, sub - num(purchaseDraft.discount));
+  if(purchaseDraft.payMethod !== 'آجل' && !purchaseDraft.paidManual){
+    purchaseDraft.paid = net;
+    const pi = document.getElementById('p_paid');
+    if(pi) pi.value = net ? String(Math.round(net*100)/100) : '';
+  }
   const paid = num(purchaseDraft.paid);
   const a=$('#purSubtotal'); if(a) a.textContent = fmt(sub);
   const b=$('#purNet'); if(b) b.textContent = fmt(net)+' '+CUR;
@@ -6397,7 +6420,7 @@ function editPurchase(id){
   if(db.purchaseReturns.some(r=>r.purchaseId===id)) return toast('على هذه الفاتورة مرتجعات — احذف المرتجع أولاً ثم عدّل الفاتورة','err',5000);
   closeModal();
   purchaseDraft = { number:p.number, date:dateOnly(p.date), supplierId:p.supplierId||'', supplierName:p.supplierName==='مورد'?'':(p.supplierName||''), phone:p.phone||'',
-    items:JSON.parse(JSON.stringify(p.items)), discount:num(p.discount), paid:num(p.paid), payMethod:p.payMethod||'نقدي', account:p.account||accountOfRef(p.id), notes:p.notes||'', editId:p.id };
+    items:JSON.parse(JSON.stringify(p.items)), discount:num(p.discount), paid:num(p.paid), payMethod:p.payMethod||'نقدي', account:p.account||accountOfRef(p.id), notes:p.notes||'', editId:p.id, paidManual:true };
   state.purchaseView = 'form'; go('purchases');
 }
 function saveWithEdit(kind){
