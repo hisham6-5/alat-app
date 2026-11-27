@@ -1,6 +1,6 @@
 /* AlAT..CO service worker — offline app shell.
-   لأي تحديث قادم: غيّر اسم الكاش (مثلاً alat-v6.4) حتى تصل النسخة الجديدة لكل جهاز. */
-const CACHE = 'alat-v6.4';
+   لأي تحديث قادم: غيّر اسم الكاش (مثلاً alat-v7.0) حتى تصل النسخة الجديدة لكل جهاز. */
+const CACHE = 'alat-v7.0';
 const ASSETS = [
   './',
   './index.html',

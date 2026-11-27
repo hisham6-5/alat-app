@@ -1618,7 +1618,7 @@ function deepMerge(a, b){
   Object.keys(b || {}).forEach(k => { if(k === '__proto__' || k === 'constructor' || k === 'prototype') return; if(isObj(a[k]) && isObj(b[k])) deepMerge(a[k], b[k]); else a[k] = b[k]; });
   return a;
 }
-const DB_ARRAYS = ['products','customers','suppliers','sales','purchases','salesReturns','purchaseReturns','expenses','payments','treasury','quotes','partners','partnerTx','distributions','audit','stocktakes','wallets','shelves'];
+const DB_ARRAYS = ['products','customers','suppliers','sales','purchases','salesReturns','purchaseReturns','expenses','payments','treasury','quotes','partners','partnerTx','distributions','audit','stocktakes','wallets','shelves','held'];
 /* أمان: تعقيم البيانات المحمّلة/المستورَدة — المعرّفات والتواريخ والأرقام لا تحتوي إلا على أحرف آمنة */
 const SAN_NUM = new Set(['amount','paid','due','net','price','cost','costPrice','salePrice','wholesalePrice','discount','opening','openingBalance','balance','total','subtotal','fee','refund','lineTotal','profit','qty','minQty','maxQty','pct','percent','share','days','stock','book','need','rate','count','quantity']);
 function sanitizeData(o, depth){
@@ -9524,6 +9524,264 @@ init();
       s.style.setProperty('--mx',(e.clientX-r.left)+'px'); s.style.setProperty('--my',(e.clientY-r.top)+'px');
     },{passive:true});
   }catch(err){}
+})();
+
+</script>
+<script>
+/* v7 — فواتير معلقة، تصدير/استيراد Excel (xlsx)، PDF للقوائم، تنبيه النواقص، اختصارات الرئيسية */
+(function(){
+'use strict';
+/* ---------- فواتير معلقة ---------- */
+function heldList(kind){ return (db.held||[]).filter(h=>h.kind===kind); }
+window.holdInvoice = function(kind){
+  const d = kind==='sale' ? saleDraft : purchaseDraft;
+  if(!d){ return; }
+  if(d.editId){ toast('لا يمكن تعليق فاتورة قيد التعديل','err'); return; }
+  if(!d.items || !d.items.length){ toast('أضف صنفًا واحدًا على الأقل قبل التعليق','err'); return; }
+  if(!Array.isArray(db.held)) db.held = [];
+  db.held.push({id:uid(), kind:kind, savedAt:nowStr(), draft:JSON.parse(JSON.stringify(d))});
+  save();
+  if(kind==='sale'){ saleDraft=null; state.saleView='list'; } else { purchaseDraft=null; state.purchaseView='list'; }
+  render(); toast('تم تعليق الفاتورة. هتلاقيها في "الفواتير المعلقة" فوق القائمة','ok',4000);
+};
+window.resumeHeld = function(id){
+  const h = (db.held||[]).find(x=>x.id===id); if(!h) return;
+  const cur = h.kind==='sale' ? saleDraft : purchaseDraft;
+  if(cur && cur.items && cur.items.length){ toast('في فاتورة مفتوحة. احفظها أو علّقها الأول','err',4000); return; }
+  const d = JSON.parse(JSON.stringify(h.draft));
+  if(invoiceNumberUsed(h.kind, d.number)) d.number = invoiceNextNumber(h.kind);
+  db.held = db.held.filter(x=>x.id!==id); save();
+  if(h.kind==='sale'){ saleDraft=d; state.saleView='form'; go('sales'); }
+  else { purchaseDraft=d; state.purchaseView='form'; go('purchases'); }
+};
+window.deleteHeld = function(id){
+  confirmDialog('حذف الفاتورة المعلقة نهائيًا؟ (مفيش حاجة اتخصمت من المخزون)', ()=>{
+    db.held = (db.held||[]).filter(x=>x.id!==id); save(); render();
+  });
+};
+function heldCard(kind){
+  const L = heldList(kind); if(!L.length) return '';
+  const rows = L.slice().reverse().map(h=>{
+    const d=h.draft, tot=(d.items||[]).reduce((a,i)=>a+lineNet(i),0)-num(d.discount);
+    const who = esc(d.customerName||d.supplierName||(kind==='sale'?'عميل نقدي':'مورد'));
+    return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--border)">
+      <div style="flex:1;min-width:180px"><b>${who}</b><br><span style="font-size:11.5px;color:var(--muted)">${(d.items||[]).length} صنف — علّقتها ${esc(h.savedAt||'')}</span></div>
+      <b>${fmt(Math.max(0,tot))} ${CUR}</b>
+      <button class="btn xs green" onclick="resumeHeld('${h.id}')">▶ استكمال</button>
+      <button class="btn xs red" onclick="deleteHeld('${h.id}')">حذف</button></div>`;
+  }).join('');
+  return `<div class="card" style="border-right:4px solid var(--warn)"><h3>⏸ فواتير معلقة (${L.length})</h3>${rows}</div>`;
+}
+function wrap(name, fn){ const o=window[name]; window[name]=function(){ return fn(o.apply(this,arguments), arguments); }; }
+function insertBeforeCard(html, extra){ if(!extra) return html; const i = html.indexOf('<div class="card">'); return i<0 ? html+extra : html.slice(0,i)+extra+html.slice(i); }
+wrap('renderSalesList', h=>insertBeforeCard(h, heldCard('sale')).replace('<button class="btn green" onclick="newSale()">＋ فاتورة بيع جديدة</button>', `<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn outline" onclick="exportSalesXLSX()">⬇️ Excel</button><button class="btn ghost" onclick="exportSalesPDF()">PDF</button><button class="btn green" onclick="newSale()">＋ فاتورة بيع جديدة</button></div>`));
+wrap('renderPurchasesList', h=>insertBeforeCard(h, heldCard('purchase')).replace('<button class="btn orange" onclick="newPurchase()">＋ فاتورة شراء جديدة</button>', `<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn outline" onclick="exportPurchasesXLSX()">⬇️ Excel</button><button class="btn ghost" onclick="exportPurchasesPDF()">PDF</button><button class="btn orange" onclick="newPurchase()">＋ فاتورة شراء جديدة</button></div>`));
+wrap('renderSaleForm', h=>h.replace(/(<button class="btn ghost" onclick="cancelSale\(\)">إلغاء<\/button>)/, `<button class="btn orange" onclick="holdInvoice('sale')">⏸ تعليق الفاتورة</button>$1`));
+wrap('renderPurchaseForm', h=>h.replace(/(<button class="btn ghost" onclick="cancelPurchase\(\)">إلغاء<\/button>)/, `<button class="btn orange" onclick="holdInvoice('purchase')">⏸ تعليق الفاتورة</button>$1`));
+
+/* ---------- xlsx: كتابة وقراءة (بدون مكتبات) ---------- */
+const CRC_T = (function(){ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c = c&1 ? 0xEDB88320^(c>>>1) : c>>>1; t[n]=c>>>0; } return t; })();
+function crc32(b){ let c=0xFFFFFFFF; for(let i=0;i<b.length;i++) c = CRC_T[(c^b[i])&255]^(c>>>8); return (c^0xFFFFFFFF)>>>0; }
+const enc = new TextEncoder();
+function zipStore(files){
+  const parts=[], cd=[]; let off=0;
+  files.forEach(f=>{
+    const name=enc.encode(f.name), data=f.data, crc=crc32(data);
+    const lh=new DataView(new ArrayBuffer(30)); lh.setUint32(0,0x04034b50,true); lh.setUint16(4,20,true); lh.setUint16(6,0x0800,true); lh.setUint16(8,0,true);
+    lh.setUint16(10,0,true); lh.setUint16(12,0x21,true); lh.setUint32(14,crc,true); lh.setUint32(18,data.length,true); lh.setUint32(22,data.length,true); lh.setUint16(26,name.length,true); lh.setUint16(28,0,true);
+    parts.push(new Uint8Array(lh.buffer),name,data);
+    const ch=new DataView(new ArrayBuffer(46)); ch.setUint32(0,0x02014b50,true); ch.setUint16(4,20,true); ch.setUint16(6,20,true); ch.setUint16(8,0x0800,true); ch.setUint16(10,0,true);
+    ch.setUint16(12,0,true); ch.setUint16(14,0x21,true); ch.setUint32(16,crc,true); ch.setUint32(20,data.length,true); ch.setUint32(24,data.length,true); ch.setUint16(28,name.length,true); ch.setUint32(42,off,true);
+    cd.push(new Uint8Array(ch.buffer),name);
+    off += 30+name.length+data.length;
+  });
+  let cdLen=0; cd.forEach(p=>cdLen+=p.length);
+  const end=new DataView(new ArrayBuffer(22)); end.setUint32(0,0x06054b50,true); end.setUint16(8,files.length,true); end.setUint16(10,files.length,true); end.setUint32(12,cdLen,true); end.setUint32(16,off,true);
+  return new Blob(parts.concat(cd,[new Uint8Array(end.buffer)]),{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+}
+function xe(s){ return String(s).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function colName(i){ let s=''; i++; while(i>0){ const m=(i-1)%26; s=String.fromCharCode(65+m)+s; i=Math.floor((i-1)/26); } return s; }
+function buildXLSX(headers, rows, sheetName){
+  const all=[headers].concat(rows);
+  const widths = headers.map((h,i)=>{ let w=String(h).length; rows.forEach(r=>{ w=Math.max(w,String(r[i]==null?'':r[i]).length); }); return Math.min(45,Math.max(10,w+3)); });
+  let sd='';
+  all.forEach((r,ri)=>{
+    sd+=`<row r="${ri+1}">`;
+    r.forEach((v,ci)=>{
+      const ref=colName(ci)+(ri+1), st = ri===0?' s="1"':'';
+      if(typeof v==='number' && isFinite(v)) sd+=`<c r="${ref}"${st}><v>${v}</v></c>`;
+      else if(v!=null && String(v)!=='') sd+=`<c r="${ref}"${st} t="inlineStr"><is><t xml:space="preserve">${xe(v)}</t></is></c>`;
+    });
+    sd+='</row>';
+  });
+  const sheet=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView rightToLeft="1" workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${widths.map((w,i)=>`<col min="${i+1}" max="${i+1}" width="${w}" customWidth="1"/>`).join('')}</cols><sheetData>${sd}</sheetData></worksheet>`;
+  const styles=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFBBF24"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+  const F=(n,s)=>({name:n,data:enc.encode(s)});
+  return zipStore([
+    F('[Content_Types].xml','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'),
+    F('_rels/.rels','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'),
+    F('xl/workbook.xml',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${xe(String(sheetName||'Sheet1').replace(/[\\\/\?\*\[\]:]/g,' ').slice(0,31))}" sheetId="1" r:id="rId1"/></sheets></workbook>`),
+    F('xl/_rels/workbook.xml.rels','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'),
+    F('xl/styles.xml',styles), F('xl/worksheets/sheet1.xml',sheet)
+  ]);
+}
+function saveBlob(blob, name){
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),60000);
+}
+window.xlsxDownload = function(name, headers, rows, sheet){ saveBlob(buildXLSX(headers, rows, sheet), name); };
+
+async function inflateRaw(u8){
+  const ds=new DecompressionStream('deflate-raw'); const w=ds.writable.getWriter(); w.write(u8); w.close();
+  return new Uint8Array(await new Response(ds.readable).arrayBuffer());
+}
+async function readZip(buf){
+  const u8=new Uint8Array(buf), dv=new DataView(buf); let e=-1;
+  for(let i=u8.length-22;i>=Math.max(0,u8.length-66000);i--){ if(dv.getUint32(i,true)===0x06054b50){ e=i; break; } }
+  if(e<0) throw new Error('الملف ليس Excel صالحًا');
+  const n=dv.getUint16(e+10,true); let p=dv.getUint32(e+16,true); const out={};
+  for(let k=0;k<n;k++){
+    if(dv.getUint32(p,true)!==0x02014b50) break;
+    const method=dv.getUint16(p+10,true), csz=dv.getUint32(p+20,true), nl=dv.getUint16(p+28,true), el=dv.getUint16(p+30,true), cl=dv.getUint16(p+32,true), lo=dv.getUint32(p+42,true);
+    const name=new TextDecoder().decode(u8.subarray(p+46,p+46+nl));
+    const lnl=dv.getUint16(lo+26,true), lel=dv.getUint16(lo+28,true), ds=lo+30+lnl+lel;
+    const raw=u8.subarray(ds,ds+csz);
+    out[name]={method:method, raw:raw};
+    p+=46+nl+el+cl;
+  }
+  out.__get = async function(nm){ const f=out[nm]; if(!f) return null; const d = f.method===0 ? f.raw : await inflateRaw(f.raw); return new TextDecoder('utf-8').decode(d); };
+  return out;
+}
+async function xlsxToRows(buf){
+  const z=await readZip(buf);
+  const parse=s=>new DOMParser().parseFromString(s,'application/xml');
+  let ss=[]; const sst=await z.__get('xl/sharedStrings.xml');
+  if(sst){ ss=Array.from(parse(sst).getElementsByTagName('si')).map(si=>Array.from(si.getElementsByTagName('t')).map(t=>t.textContent).join('')); }
+  let sheetPath='xl/worksheets/sheet1.xml';
+  if(!z[sheetPath]){ const k=Object.keys(z).find(x=>/^xl\/worksheets\/[^\/]+\.xml$/.test(x)); if(!k) throw new Error('لا توجد ورقة بيانات'); sheetPath=k; }
+  const doc=parse(await z.__get(sheetPath)); const rows=[];
+  Array.from(doc.getElementsByTagName('row')).forEach(r=>{
+    const row=[];
+    Array.from(r.getElementsByTagName('c')).forEach(c=>{
+      const ref=c.getAttribute('r')||''; const m=ref.match(/^([A-Z]+)/); let ci=row.length;
+      if(m){ ci=0; for(const ch of m[1]) ci=ci*26+(ch.charCodeAt(0)-64); ci-=1; }
+      const t=c.getAttribute('t'); let v='';
+      if(t==='inlineStr') v=Array.from(c.getElementsByTagName('t')).map(x=>x.textContent).join('');
+      else { const ve=c.getElementsByTagName('v')[0]; v = ve ? ve.textContent : ''; if(t==='s') v = ss[+v]||''; }
+      while(row.length<ci) row.push(''); row[ci]=v;
+    });
+    if(row.some(x=>String(x).trim()!=='')) rows.push(row);
+  });
+  return rows;
+}
+const _impCSV = window.importProductsCSV;
+window.importProductsCSV = function(input){
+  const f=input.files && input.files[0]; if(!f) return;
+  if(!/\.xlsx$/i.test(f.name)) return _impCSV(input);
+  const fr=new FileReader();
+  fr.onload=async()=>{
+    try{
+      const rows=await xlsxToRows(fr.result);
+      const csv=rows.map(r=>r.map(csvCell).join(',')).join('\r\n');
+      _impCSV({files:[new File(['\ufeff'+csv],'import.csv',{type:'text/csv'})], value:''});
+    }catch(e){ toast('فشل قراءة ملف Excel: '+e.message,'err',5000); }
+    input.value='';
+  };
+  fr.readAsArrayBuffer(f);
+};
+window.exportProductsCSV = function(template){
+  const H=CSV_COLS.map(c=>c[1]);
+  const rows = template ? [] : db.products.map(p=>CSV_COLS.map(c=>{ const v=p[c[0]]; return (typeof v==='number')?v:(v==null?'':String(v)); }));
+  xlsxDownload(template?'قالب_الأصناف.xlsx':`الأصناف_${todayStr()}.xlsx`, H, rows, 'الأصناف');
+  toast(template?'تم تنزيل قالب Excel':'تم تصدير الأصناف إلى Excel','ok');
+};
+wrap('renderProducts', h=>h
+  .replace('accept=".csv,text/csv"','accept=".xlsx,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"')
+  .replace('قالب CSV','قالب Excel')
+  .replace('<button class="btn ghost" onclick="printProducts()">🖨️ طباعة</button>','<button class="btn ghost" onclick="printProducts()">🖨️ طباعة</button><button class="btn ghost" onclick="exportProductsPDF()">PDF</button>'));
+
+/* ---------- قوائم الفواتير: Excel + PDF ---------- */
+function invRows(kind){
+  const L = kind==='sale' ? db.sales : db.purchases;
+  return L.slice().reverse().map(x=>{
+    const net = kind==='sale' ? saleNet(x) : purchaseNet(x), sub = kind==='sale' ? saleSubtotal(x) : purchaseSubtotal(x);
+    return [x.number, dateOnly(x.date), kind==='sale'?(x.customerName||'عميل نقدي'):(x.supplierName||'مورد'), x.phone||'', (x.items||[]).length, rq(sub), rq(invoiceAllDiscount(x)), rq(net), rq(num(x.paid)), rq(net-num(x.paid)), x.payMethod||''];
+  });
+}
+function invHeaders(kind){ return ['رقم الفاتورة','التاريخ',kind==='sale'?'العميل':'المورد','الهاتف','عدد الأصناف','الإجمالي','الخصم','الصافي','المدفوع','المتبقي','طريقة الدفع']; }
+window.exportSalesXLSX = ()=>{ xlsxDownload(`فواتير_البيع_${todayStr()}.xlsx`, invHeaders('sale'), invRows('sale'), 'فواتير البيع'); toast('تم تصدير فواتير البيع','ok'); };
+window.exportPurchasesXLSX = ()=>{ xlsxDownload(`فواتير_الشراء_${todayStr()}.xlsx`, invHeaders('purchase'), invRows('purchase'), 'فواتير الشراء'); toast('تم تصدير فواتير الشراء','ok'); };
+function pdfTable(title, headers, rows){
+  const td = v => `<td>${esc(typeof v==='number'?fmt(v):v)}</td>`;
+  printHTML(title, printHeader(title) + `<table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(td).join('')}</tr>`).join('')}</tbody></table>`);
+  toast('في نافذة الطباعة اختر "حفظ كـ PDF" (على الآيفون: مشاركة ← حفظ في الملفات)','',6000);
+}
+window.exportSalesPDF = ()=>pdfTable('فواتير البيع', invHeaders('sale'), invRows('sale'));
+window.exportPurchasesPDF = ()=>pdfTable('فواتير الشراء', invHeaders('purchase'), invRows('purchase'));
+window.exportProductsPDF = ()=>{ printProducts(); toast('في نافذة الطباعة اختر "حفظ كـ PDF" (على الآيفون: مشاركة ← حفظ في الملفات)','',6000); };
+
+/* ---------- تنبيه النواقص: شارة في القائمة + تنبيه عند الدخول ---------- */
+function lowItems(){ return db.products.filter(p=>num(p.qty)<=num(p.minQty)); }
+function updateBadges(){
+  try{
+    document.querySelectorAll('#nav .nbadge').forEach(b=>b.remove());
+    const put=(page,n,cls)=>{ if(!n) return; const el=document.querySelector(`#nav .nav-item[data-page="${page}"]`); if(!el) return; const s=document.createElement('span'); s.className='nbadge '+(cls||''); s.textContent=n>99?'99+':String(n); el.appendChild(s); };
+    if(db.settings.rules.lowAlert!==false){ put('products', lowItems().length, 'warn'); put('reorder', lowItems().length, 'warn'); }
+    put('sales', heldList('sale').length, 'held'); put('purchases', heldList('purchase').length, 'held');
+  }catch(e){}
+}
+const _render = window.render;
+window.render = function(){ const r=_render.apply(this,arguments); updateBadges(); return r; };
+const _renderNav = window.renderNav;
+window.renderNav = function(){ const r=_renderNav.apply(this,arguments); updateBadges(); return r; };
+let _lowToastDone=false;
+const _enter = window.enterSmartAccounts;
+window.enterSmartAccounts = function(){
+  const r=_enter.apply(this,arguments);
+  setTimeout(()=>{ try{
+    if(_lowToastDone || document.body.classList.contains('login-locked')) return;
+    const n=lowItems().length; if(n && db.settings.rules.lowAlert!==false){ _lowToastDone=true; toast(`⚠️ تنبيه مخزون: ${n} صنف وصل للحد الأدنى أو أقل`,'err',6000); }
+  }catch(e){} }, 900);
+  return r;
+};
+
+/* ---------- الرئيسية: اختصارات + الخزائن (زي شاشة البدر) ---------- */
+wrap('renderDashboard', h=>{
+  if(db.settings.dash && db.settings.dash.showQuick===false) return h;
+  const nSale=heldList('sale').length+heldList('purchase').length, nLow=lowItems().length;
+  const tile=(c,ico,label,act,badge)=>`<button class="v7tile ${c}" onclick="${act}"><span class="v7ico">${ico}</span><span class="v7lb">${label}</span>${badge?`<span class="v7bd">${badge}</span>`:''}</button>`;
+  const tiles=`<div class="v7tiles">
+    ${tile('g','🧾','فاتورة بيع جديدة','newSale()')}
+    ${tile('o','📥','فاتورة شراء جديدة','newPurchase()')}
+    ${tile('b','🏷️','عرض سعر جديد','go(\'quotes\');newQuote()')}
+    ${tile('p','📦','الأصناف','go(\'products\')',nLow?nLow+' نواقص':'')}
+    ${tile('y','⏸','فواتير معلقة',`go('sales')`,nSale||'')}
+    ${tile('c','👥','العملاء','go(\'customers\')')}
+  </div>`;
+  let boxes='';
+  try{
+    const bal=accBalances(), act=walletsActive().map(w=>w.name);
+    if(act.length) boxes=`<div class="v7boxes">${act.map(n=>`<div class="v7box"><span>💼 ${esc(n)}</span><b>${fmt(bal[n]||0)} ${CUR}</b></div>`).join('')}</div>`;
+  }catch(e){}
+  const i=h.indexOf('<div class="stats-grid">'); if(i<0) return h;
+  return h.slice(0,i)+tiles+boxes+h.slice(i);
+});
+const css=document.createElement('style'); css.textContent=`
+.v7tiles{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:16px}@media(max-width:1250px){.v7tiles{grid-template-columns:repeat(3,1fr)}}@media(max-width:420px){.v7tiles{gap:8px}.v7tile{padding:12px 6px;font-size:12px}}
+.v7tile{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:16px 10px;border:0;border-radius:14px;color:#fff;cursor:pointer;font-weight:700;font-size:13.5px;box-shadow:0 6px 16px rgba(0,0,0,.14);transition:transform .15s}
+.v7tile:hover{transform:translateY(-3px)}
+.v7tile .v7ico{font-size:26px;line-height:1}
+.v7tile.g{background:linear-gradient(135deg,#16a34a,#15803d)}.v7tile.o{background:linear-gradient(135deg,#f59e0b,#d97706)}.v7tile.b{background:linear-gradient(135deg,#0ea5e9,#0369a1)}
+.v7tile.p{background:linear-gradient(135deg,#8b5cf6,#6d28d9)}.v7tile.y{background:linear-gradient(135deg,#475569,#1e293b)}.v7tile.c{background:linear-gradient(135deg,#14b8a6,#0f766e)}
+.v7bd{position:absolute;top:8px;left:8px;background:#fff;color:#b91c1c;border-radius:999px;padding:1px 8px;font-size:11px;font-weight:800}
+.v7boxes{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:16px}
+.v7box{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:12px 14px;border-radius:12px;background:var(--card);border:1px solid var(--border);border-right:4px solid #16a34a;box-shadow:var(--shadow)}
+.v7box b{font-size:15px}
+.nbadge{margin-inline-start:auto;min-width:20px;height:20px;padding:0 6px;border-radius:999px;font-size:11px;font-weight:800;display:inline-flex;align-items:center;justify-content:center;background:#ef4444;color:#fff}
+.nbadge.warn{background:#f59e0b;color:#1e293b}.nbadge.held{background:#38bdf8;color:#0b1220}
+.sb-collapsed .nbadge{position:absolute;top:2px;left:2px;min-width:16px;height:16px;font-size:9px;padding:0 4px}
+`; document.head.appendChild(css);
+updateBadges();
 })();
 
 </script>
